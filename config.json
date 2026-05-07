@@ -1,0 +1,21 @@
+{
+  "gateway": {
+    "host": "127.0.0.1",
+    "port": 8765,
+    "db_path": "data/at_bot.sqlite3",
+    "worker_count": 3,
+    "max_queue_size": 100,
+    "event_retention_seconds": 86400,
+    "rate_limit_window_seconds": 3600,
+    "rate_limit_max_mentions": 3
+  },
+  "channels": {
+    "bilibili": {
+      "enabled": true,
+      "cookie_file": "bilibili/bilibili_cookies.json",
+      "unread_poll_base_seconds": 60,
+      "unread_poll_jitter_seconds": 10,
+      "at_fetch_min_interval_seconds": 10
+    }
+  }
+}

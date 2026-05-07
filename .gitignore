@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+
+data/
+
+# Login cookies are account credentials. Keep them local.
+bilibili/*cookies*.json
+
+# Local packet-capture notes may contain live cookies.
+bilibili/note.txt
