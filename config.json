@@ -7,7 +7,7 @@
     "max_queue_size": 100,
     "event_retention_seconds": 86400,
     "rate_limit_window_seconds": 3600,
-    "rate_limit_max_mentions": 3
+    "rate_limit_max_mentions": 30000
   },
   "channels": {
     "bilibili": {
@@ -15,7 +15,23 @@
       "cookie_file": "bilibili/bilibili_cookies.json",
       "unread_poll_base_seconds": 60,
       "unread_poll_jitter_seconds": 10,
-      "at_fetch_min_interval_seconds": 10
+      "at_fetch_min_interval_seconds": 10,
+      "ignore_existing_on_start": true,
+      "max_notice_age_seconds": 1800
+    },
+    "douyin": {
+      "enabled": false,
+      "cookie_file": "dy/douyin_state.json",
+      "user_data_dir": "",
+      "cdp_url": "http://127.0.0.1:9222",
+      "start_url": "https://www.douyin.com/jingxuan",
+      "headless": true,
+      "poll_base_seconds": 60,
+      "poll_jitter_seconds": 10,
+      "ignore_existing_on_start": true,
+      "max_notice_age_seconds": 1800,
+      "reply_batch_size": 5,
+      "reply_interval_seconds": 8
     }
   }
 }

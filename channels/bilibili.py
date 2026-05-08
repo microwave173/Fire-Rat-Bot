@@ -1,46 +1,24 @@
-from pathlib import Path
-import json
 import random
 import time
 
 import requests
 
+from channels.common import (
+    fetch_ready_replies as gateway_fetch_ready_replies,
+    finish_reply as gateway_finish_reply,
+    gateway_url,
+    get_cookie_value,
+    load_config,
+    load_playwright_cookie_jar,
+    submit_events,
+)
 
-CONFIG_PATH = Path("config.json")
 GATEWAY_URL = None
-
-
-def load_config():
-    with CONFIG_PATH.open("r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def load_cookie_jar(cookie_file):
-    cookie_file = Path(cookie_file)
-    with cookie_file.open("r", encoding="utf-8") as f:
-        cookies = json.load(f)
-
-    jar = requests.cookies.RequestsCookieJar()
-    for cookie in cookies:
-        jar.set(
-            cookie["name"],
-            cookie["value"],
-            domain=cookie.get("domain"),
-            path=cookie.get("path", "/"),
-        )
-    return jar
-
-
-def get_cookie_value(session, name):
-    for cookie in session.cookies:
-        if cookie.name == name:
-            return cookie.value
-    return None
 
 
 def make_session(cookie_file):
     session = requests.Session()
-    session.cookies = load_cookie_jar(cookie_file)
+    session.cookies = load_playwright_cookie_jar(cookie_file)
     session.headers.update(
         {
             "accept": "*/*",
@@ -101,26 +79,37 @@ def normalize_at_item(item):
     }
 
 
-def submit_events_to_gateway(events):
-    response = requests.post(f"{GATEWAY_URL}/events", json={"events": events}, timeout=15)
-    response.raise_for_status()
-    return response.json()
+def filter_recent_events(events, max_age_seconds):
+    if not max_age_seconds:
+        return events
+
+    cutoff = int(time.time()) - int(max_age_seconds)
+    recent_events = [event for event in events if int(event.get("created_at") or 0) >= cutoff]
+    skipped = len(events) - len(recent_events)
+    if skipped:
+        print(f"skip {skipped} old bilibili events older than {max_age_seconds}s")
+    return recent_events
+
+
+def event_ids(events):
+    return {str(event["event_id"]) for event in events}
+
+
+def only_new_events(events, seen_ids):
+    new_events = [event for event in events if str(event["event_id"]) not in seen_ids]
+    skipped = len(events) - len(new_events)
+    if skipped:
+        print(f"skip {skipped} already seen bilibili events")
+    seen_ids.update(event_ids(events))
+    return new_events
 
 
 def fetch_ready_replies():
-    response = requests.get(f"{GATEWAY_URL}/replies/ready", params={"platform": "bilibili"}, timeout=15)
-    response.raise_for_status()
-    return response.json().get("items", [])
+    return gateway_fetch_ready_replies(GATEWAY_URL, "bilibili")
 
 
 def finish_reply(db_id, ok, error=None):
-    response = requests.post(
-        f"{GATEWAY_URL}/replies/finish",
-        json={"db_id": db_id, "ok": ok, "error": error},
-        timeout=15,
-    )
-    response.raise_for_status()
-    return response.json()
+    return gateway_finish_reply(GATEWAY_URL, db_id, ok, error)
 
 
 def build_bilibili_reply_payload(reply_job, csrf):
@@ -181,14 +170,29 @@ def sleep_seconds(config):
 def main():
     global GATEWAY_URL
     config = load_config()
-    gateway = config["gateway"]
     channel_config = config["channels"]["bilibili"]
-    GATEWAY_URL = f"http://{gateway['host']}:{gateway['port']}"
+    GATEWAY_URL = gateway_url(config)
 
     session = make_session(channel_config["cookie_file"])
     print("bilibili channel started")
 
     last_at_fetch = 0
+    ignore_existing_on_start = channel_config.get("ignore_existing_on_start", True)
+    max_notice_age_seconds = channel_config.get("max_notice_age_seconds")
+    seen_event_ids = set()
+
+    if ignore_existing_on_start:
+        try:
+            baseline_items = fetch_at_messages(session)
+            baseline_events = [normalize_at_item(item) for item in baseline_items]
+            seen_event_ids.update(event_ids(baseline_events))
+            print(
+                "baseline bilibili startup: marked "
+                f"{len(seen_event_ids)} existing events as read without reply"
+            )
+        except Exception as exc:
+            print(f"baseline bilibili startup failed: {exc}")
+
     while True:
         try:
             unread_at = check_unread_at(session)
@@ -197,8 +201,14 @@ def main():
             if unread_at > 0 and time.time() - last_at_fetch >= channel_config["at_fetch_min_interval_seconds"]:
                 items = fetch_at_messages(session)
                 events = [normalize_at_item(item) for item in items]
-                result = submit_events_to_gateway(events)
-                print(f"submitted {len(events)} events: {result}")
+                events = filter_recent_events(events, max_notice_age_seconds)
+                events = only_new_events(events, seen_event_ids)
+
+                if events:
+                    result = submit_events(GATEWAY_URL, events)
+                    print(f"submitted {len(events)} events: {result}")
+                else:
+                    print("no bilibili at events to submit")
                 last_at_fetch = time.time()
 
             process_ready_replies(session)

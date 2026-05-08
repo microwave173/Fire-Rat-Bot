@@ -2,9 +2,19 @@ __pycache__/
 *.pyc
 
 data/
+logs/
+video_summary/
+note.txt
 
 # Login cookies are account credentials. Keep them local.
 bilibili/*cookies*.json
 
 # Local packet-capture notes may contain live cookies.
 bilibili/note.txt
+dy/note.txt
+
+# Douyin login cookies/signature captures are also local credentials.
+dy/*cookies*.json
+dy/*state*.json
+dy/*profile*/
+dy/chrome_profile/

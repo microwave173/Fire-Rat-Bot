@@ -14,10 +14,18 @@
 ├── gateway.py
 ├── channels/
 │   ├── __init__.py
+│   ├── common.py
+│   ├── douyin.py
 │   └── bilibili.py
-└── bilibili/
+├── bilibili/
+│   ├── get_cookie.py
+│   ├── bilibili_cookies.json
+│   └── note.txt
+└── dy/
     ├── get_cookie.py
-    ├── bilibili_cookies.json
+    ├── douyin_cookies.json
+    ├── douyin_state.json
+    ├── douyin_profile/
     └── note.txt
 ```
 
@@ -30,6 +38,7 @@
 ```bash
 python gateway.py
 python -m channels.bilibili
+python -m channels.douyin
 ```
 
 ### `DESIGN.md`
@@ -57,6 +66,16 @@ python -m channels.bilibili
 - `channels.bilibili.unread_poll_base_seconds`：unread 探针基础轮询间隔。
 - `channels.bilibili.unread_poll_jitter_seconds`：轮询随机抖动。
 - `channels.bilibili.at_fetch_min_interval_seconds`：拉取完整 @ 列表的最小间隔。
+- `channels.douyin.cookie_file`：Douyin Playwright storage_state 路径，推荐 `dy/douyin_state.json`。
+- `channels.douyin.user_data_dir`：Douyin 持久化 Chromium 用户目录，推荐 `dy/douyin_profile`。写操作优先复用它。
+- `channels.douyin.start_url`：Douyin channel 启动时打开的页面。
+- `channels.douyin.headless`：Douyin channel 是否用无图形界面的 Playwright Chromium。
+- `channels.douyin.poll_base_seconds`：Douyin 通知轮询基础间隔。
+- `channels.douyin.poll_jitter_seconds`：Douyin 通知轮询随机抖动。
+- `channels.douyin.ignore_existing_on_start`：启动后的第一轮只建立基线，不提交已有通知，避免批量回复历史 @。
+- `channels.douyin.max_notice_age_seconds`：只处理最近多少秒内产生的 @ 通知。
+- `channels.douyin.reply_batch_size`：每轮最多发送多少条 Douyin 回复，避免短时间集中发送。
+- `channels.douyin.reply_interval_seconds`：同一轮批量回复时，两条回复之间的基础间隔。
 
 ### `bot_core.py`
 
@@ -106,7 +125,7 @@ HTTP 接口：
 
 - `GET /health`：健康检查。
 - `POST /events`：channel 提交标准化事件。
-- `GET /replies/ready?platform=bilibili`：channel 拉取待发送的回复。
+- `GET /replies/ready?platform=<platform>`：channel 拉取待发送的回复。
 - `POST /replies/finish`：channel 回写平台回复是否成功。
 
 事件状态：
@@ -135,12 +154,10 @@ Bilibili 平台接入层。
 
 关键函数：
 
-- `load_cookie_jar(cookie_file)`：读取 Playwright 导出的 Cookie JSON，转换成 `requests` CookieJar。
 - `make_session(cookie_file)`：创建带 Cookie 和基础 headers 的 `requests.Session`。
 - `check_unread_at(session)`：请求 Bilibili unread 接口，返回 `data.at`。
 - `fetch_at_messages(session)`：请求完整 @ 列表。
 - `normalize_at_item(item)`：把 Bilibili @ item 转成标准事件。
-- `submit_events_to_gateway(events)`：提交事件到 gateway。
 - `fetch_ready_replies()`：从 gateway 拉取待发送回复。
 - `build_bilibili_reply_payload(reply_job, csrf)`：把 gateway 回复任务转成 Bilibili 回复 payload。
 - `send_bilibili_reply(session, reply_job)`：调用 Bilibili 回复接口。
@@ -157,6 +174,102 @@ root   = item.root_id or item.source_id
 parent = item.source_id
 csrf   = cookie.bili_jct
 ```
+
+### `channels/douyin.py`
+
+Douyin 平台接入层。
+
+职责：
+
+- 优先使用 `dy/douyin_profile` 持久化浏览器目录。
+- 如果未配置 `user_data_dir`，才读取 `dy/douyin_state.json`，不存在时退回 `dy/douyin_cookies.json`。
+- 请求 Douyin notice 接口。
+- 只处理 `type=45` 的 @ 评论通知。
+- 把 Douyin 原始通知转换成 gateway 能理解的标准化事件。
+- 从 gateway 拉取 `reply_ready` 任务。
+- 调 Douyin 评论回复接口。
+- 把回复结果回写 gateway。
+
+关键类和函数：
+
+- `make_context(...)`：创建 Playwright Chromium context，并加载 Cookie。
+- `fetch_douyin_notices(page)`：在 Douyin 页面运行时中主动请求 notice 接口。
+- `normalize_at_notices(notices)`：过滤并转换 @ 通知。
+- `normalize_notice(notice)`：把单条 Douyin @ 通知转成标准事件。
+- `normalize_web_notice(notice)`：处理网页版 notice 结构。
+- `normalize_push_notice(notice)`：处理移动端 push 同步到网页后的扁平结构。
+- `extract_cid(schema_url)`：从 `aweme://...?...cid=xxx` 里提取评论 ID。
+- `browser_fetch_json(page, path, payload)`：在页面 JS 环境里发 POST 请求。
+- `build_douyin_reply_payload(reply_job)`：把 gateway 回复任务转成 Douyin 回复 payload。
+- `send_douyin_reply(page, reply_job)`：调用 Douyin 回复接口。
+- `process_ready_replies(page)`：批量处理待发送回复。
+- `main()`：Douyin channel 主循环。
+
+Douyin 回复字段映射：
+
+```text
+aweme_id = notice.at.aweme.aweme_id
+reply_id = notice.at.schema_url 里的 cid
+text     = bot_core 返回的 reply_text
+```
+
+Douyin channel 当前优先通过 `cdp_url` 连接一份已经登录的真实 Chrome。回复前会进入 `https://www.douyin.com/jingxuan?modal_id=<aweme_id>`，再在页面 JS 环境里发送评论回复请求。这样可以复用网页运行时自动生成的 `a_bogus`、`msToken`、`bd-ticket-guard-*`、`x-tt-session-dtrait` 等风控参数。
+
+当前实现仍然是实验版：真实网页连续回复可能触发验证码或“操作过于频繁”。如果出现这类风控，需要在 noVNC 的真实 Chrome 中人工验证，channel 继续复用同一个浏览器 profile。
+
+批量自动化策略：
+
+- 每轮先拉取 @ 通知，标准化后提交给 gateway。
+- 默认第一轮只建立基线，不提交当前 notice 列表里已有的历史 @。
+- 默认只处理最近 `max_notice_age_seconds` 内产生的 @。
+- gateway 负责去重、限流、调用 `bot_core` 生成回复。
+- Douyin channel 再拉取 `reply_ready` 任务，按 `reply_batch_size` 分批发送。
+- 每条回复之间等待 `reply_interval_seconds + 0~3 秒随机抖动`。
+- 当前不逆向 `a_bogus` 等签名算法，而是依赖真实 Chrome 页面运行时生成签名和安全头。
+
+### `channels/common.py`
+
+不同平台 channel 共享的小工具。
+
+主要包括：
+
+- `load_config()`：读取配置。
+- `gateway_url(config)`：拼 gateway 地址。
+- `submit_events(...)`：提交标准事件到 gateway。
+- `fetch_ready_replies(...)`：拉取指定平台待回复任务。
+- `finish_reply(...)`：回写平台回复结果。
+- `load_playwright_cookie_jar(...)`：读取 Playwright Cookie JSON。
+- `get_cookie_value(...)`：按名称读取 Cookie。
+
+## 标准事件格式
+
+所有 channel 都应该把平台原始数据转换成同一套格式再提交 gateway：
+
+```json
+{
+  "platform": "bilibili 或 douyin",
+  "event_id": "平台内唯一事件 ID",
+  "user_id": "触发 @ 的用户 ID",
+  "user_name": "触发 @ 的用户名",
+  "comment_text": "评论内容",
+  "video_url": "视频链接",
+  "created_at": 1778153815,
+  "raw": {}
+}
+```
+
+gateway 只依赖这些通用字段：
+
+- `platform`
+- `event_id`
+- `user_id`
+- `user_name`
+- `comment_text`
+- `video_url`
+- `created_at`
+- `raw`
+
+`raw` 由各平台自己保存回复所需字段。gateway 不解析 `raw`，只会原样存储并在 `reply_ready` 时交还给对应 channel。
 
 ### `bilibili/get_cookie.py`
 
@@ -181,6 +294,31 @@ python bilibili/get_cookie.py -o bilibili/bilibili_cookies_alt.json
 
 不要把真实 Cookie 提交或分享出去。
 
+### `dy/get_cookie.py`
+
+用 Playwright 打开 Chromium，让用户手动登录 Douyin，然后保存 Cookie JSON。
+
+默认输出：
+
+```text
+dy/douyin_cookies.json
+dy/douyin_state.json
+dy/douyin_profile/
+```
+
+多账号时可以指定不同文件：
+
+```bash
+python dy/get_cookie.py -o dy/douyin_cookies_main.json --state-output dy/douyin_state_main.json --user-data-dir dy/douyin_profile_main
+python dy/get_cookie.py -o dy/douyin_cookies_alt.json --state-output dy/douyin_state_alt.json --user-data-dir dy/douyin_profile_alt
+```
+
+### `dy/note.txt`
+
+人工抓包记录。里面保存了 Douyin curl、响应样例和字段对应关系。
+
+不要把真实 Cookie、签名 URL、Token 提交或分享出去。
+
 ## 主运行流程
 
 1. 启动 gateway：
@@ -195,9 +333,15 @@ python bilibili/get_cookie.py -o bilibili/bilibili_cookies_alt.json
    python -m channels.bilibili
    ```
 
-3. Bilibili channel 定时请求 unread。
+   或启动 Douyin channel：
 
-4. 如果 `unread.data.at > 0`，channel 拉取完整 @ 列表。
+   ```bash
+   python -m channels.douyin
+   ```
+
+3. channel 定时请求平台通知。
+
+4. 如果发现新的 @，channel 拉取完整 @ 列表或通知列表。
 
 5. channel 标准化事件并 POST 到 gateway `/events`。
 
@@ -214,9 +358,9 @@ python bilibili/get_cookie.py -o bilibili/bilibili_cookies_alt.json
 
 8. 当前 `bot_core` 返回 `copy that`，gateway 把状态改为 `reply_ready`。
 
-9. Bilibili channel 拉取 `/replies/ready?platform=bilibili`。
+9. channel 拉取 `/replies/ready?platform=<platform>`。
 
-10. channel 调 Bilibili 回复接口。
+10. channel 调平台回复接口。
 
 11. channel 调 `/replies/finish` 回写结果：
 
