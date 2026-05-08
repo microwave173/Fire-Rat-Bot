@@ -51,7 +51,7 @@ cd /home/ubuntu/at_bot
 ./run_novnc.sh
 ```
 
-然后通过端口转发访问 `http://127.0.0.1:6080/vnc.html`。
+然后通过 VSCode 端口转发或 SSH 隧道访问 `http://127.0.0.1:6080/vnc.html`。详细步骤见下面的“Douyin 图形化登录”。
 
 ### 3. 启动 Douyin channel
 
@@ -104,6 +104,96 @@ python bilibili/get_cookie.py
 ### Douyin
 
 Douyin channel 推荐使用真实 Chrome profile：`dy/chrome_profile`。如果服务器重启后 profile 仍在，通常只需要重新启动 Chrome/CDP，不需要重新登录。
+
+#### 服务器图形化登录：Xvfb + noVNC
+
+服务器通常没有真实屏幕，所以用 Xvfb 创建虚拟显示器，再用 noVNC 在浏览器里操作 Chrome。
+
+在服务器运行：
+
+```bash
+cd /home/ubuntu/at_bot
+. .venv/bin/activate
+./run_novnc.sh
+```
+
+这个脚本会做几件事：
+
+- 启动 `Xvfb :99`，提供虚拟屏幕。
+- 启动 `fluxbox`，提供简单窗口管理器。
+- 启动 `x11vnc`，把 `:99` 暴露成 VNC。
+- 启动 `websockify/noVNC`，把 VNC 转成网页访问。
+- 启动 `google-chrome`，使用 `dy/chrome_profile`，并打开 CDP `9222`。
+
+如果你用 VSCode Remote SSH，推荐直接在 VSCode 里转发端口：
+
+```text
+Ports 面板 -> Forward a Port -> 输入 6080
+```
+
+然后在本机浏览器打开：
+
+```text
+http://127.0.0.1:6080/vnc.html
+```
+
+如果不用 VSCode，也可以在 Mac 终端开 SSH 隧道：
+
+```bash
+ssh -L 6080:127.0.0.1:6080 ubuntu@你的服务器地址
+```
+
+然后同样打开：
+
+```text
+http://127.0.0.1:6080/vnc.html
+```
+
+进入 noVNC 后，在里面的 Chrome 登录 Douyin。登录状态会保存在服务器的 `dy/chrome_profile` 里。后续可以关闭图形界面，改用 headless Chrome 复用同一个 profile。
+
+#### 服务器 headless 运行
+
+已经登录过 `dy/chrome_profile` 后，可以不用图形界面，直接启动 headless Chrome：
+
+```bash
+cd /home/ubuntu/at_bot
+nohup google-chrome --headless=new \
+  --remote-debugging-port=9222 \
+  --user-data-dir=/home/ubuntu/at_bot/dy/chrome_profile \
+  --no-first-run \
+  --no-default-browser-check \
+  --no-sandbox \
+  --disable-gpu \
+  >/tmp/chrome-headless.log 2>&1 &
+```
+
+确认 Chrome/CDP 正常：
+
+```bash
+curl http://127.0.0.1:9222/json/version
+```
+
+#### Mac 本机调试版本
+
+如果在 Mac 本机调试，可以直接启动本机 Chrome/CDP，并使用一个单独的 profile 目录：
+
+```bash
+/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome \
+  --remote-debugging-port=9222 \
+  --user-data-dir=/Users/mabokai/Desktop/proj/at_bot/dy/chrome_profile \
+  --no-first-run \
+  --no-default-browser-check \
+  https://www.douyin.com/
+```
+
+登录后保持这个 Chrome 开着，再启动 channel：
+
+```bash
+cd /Users/mabokai/Desktop/proj/at_bot
+python -m channels.douyin
+```
+
+Mac 本机不需要 Xvfb/noVNC，因为它有真实图形界面。
 
 调试脚本：
 
